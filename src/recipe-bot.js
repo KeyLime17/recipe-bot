@@ -1,38 +1,92 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Events, EmbedBuilder } = require('discord.js');
+const axios = require('axios');
 
-const PREFIX = '!';
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,          // needed for slash commands
-    GatewayIntentBits.GuildMessages,   // needed for message-based
-    GatewayIntentBits.MessageContent,  // toggle in Portal → Bot → Message Content Intent
+    GatewayIntentBits.GuildMessages,   // keep if you still want ! commands
+    GatewayIntentBits.MessageContent,  // only needed for ! commands
   ],
 });
 
-client.once(Events.ClientReady, c => {
+// axios instance for Spoonacular
+const SPOON = axios.create({
+  baseURL: 'https://api.spoonacular.com',
+  timeout: 15000,
+  params: { apiKey: process.env.SPOONACULAR_KEY },
+});
+
+client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
 });
 
-// ---- message-based (!ping / !echo) ----
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
-
-  const [cmd, ...args] = message.content.slice(PREFIX.length).trim().split(/\s+/);
-
-  if (cmd === 'ping') return void message.reply(`Pong! ${client.ws.ping}ms`);
-  if (cmd === 'echo') return void message.reply(args.length ? args.join(' ') : 'Usage: !echo <text>');
-  return void message.reply('Unknown command. Try !ping or !echo');
-});
-
-// ---- slash-based (/ping) ----
+// Slash commands
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName === 'ping') {
-    // must reply within 3s or defer
-    await interaction.reply({ content: `Pong! ${client.ws.ping}ms`, ephemeral: true });
+
+  try {
+    if (interaction.commandName === 'ping') {
+      await interaction.reply({ content: `Pong! ${client.ws.ping}ms`, ephemeral: true });
+      return;
+    }
+
+    if (interaction.commandName === 'find') {
+      const query = interaction.options.getString('query').trim();
+      const cuisine = interaction.options.getString('cuisine').trim();
+      const diet = interaction.options.getString('diet').trim();
+
+      // Acknowledge quickly to avoid the 3s timeout
+      await interaction.deferReply();
+
+      const { data } = await SPOON.get('/recipes/complexSearch', {
+        params: {
+          query,
+          cuisine,
+          diet,
+          addRecipeInformation: true,
+          number: 5,
+        },
+      });
+
+      if (!data.results || data.results.length === 0) {
+        await interaction.editReply(`No recipes found for **${query}** (${cuisine}, ${diet}).`);
+        return;
+      }
+
+      const embeds = data.results.slice(0, 5).map((r) => {
+        const summary = stripHtml(r.summary || '').slice(0, 300);
+        return new EmbedBuilder()
+          .setTitle(r.title)
+          .setURL(r.sourceUrl || r.spoonacularSourceUrl || null)
+          .setThumbnail(r.image || null)
+          .addFields(
+            { name: 'Ready In', value: `${r.readyInMinutes ?? '—'} min`, inline: true },
+            { name: 'Servings', value: String(r.servings ?? '—'), inline: true },
+          )
+          .setDescription(summary ? summary + '…' : 'No summary available.');
+      });
+
+      await interaction.editReply({ embeds });
+      return;
+    }
+  } catch (err) {
+    console.error(err?.response?.data || err.message);
+    const msg =
+      err?.response?.status === 402
+        ? 'API quota exceeded on Spoonacular. Try later.'
+        : 'Something went wrong. Check inputs and try again.';
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(msg).catch(() => {});
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+    }
   }
 });
 
 client.login(process.env.DISCORD_TOKEN);
+
+// tiny helper to strip HTML tags from Spoonacular summaries
+function stripHtml(html) {
+  return String(html).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}

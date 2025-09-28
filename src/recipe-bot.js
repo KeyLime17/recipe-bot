@@ -94,15 +94,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const ingredient = interaction.options.getString('ingredient').trim();
         await interaction.deferReply();
 
-        // parseIngredients supports ingredientList like "2 tbsp olive oil"
-        const { data } = await SPOON.get('/recipes/parseIngredients', {
-          params: {
-            ingredientList: `${qty} ${unit} ${ingredient}`,
-            servings: 1,
-            includeNutrition: true,
-            // disableDefaultComments: true // optional
-          },
-        });
+        // POST form data (Tomcat 405 happens if you send GET here)
+        const body = new URLSearchParams();
+        body.set('ingredientList', `${qty} ${unit} ${ingredient}`);
+        body.set('servings', '1');
+        body.set('includeNutrition', 'true');
+
+        const { data } = await SPOON.post(
+          '/recipes/parseIngredients',
+          body.toString(),
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
 
         if (!Array.isArray(data) || !data.length) {
           await interaction.editReply(`Could not parse nutrition for **${qty} ${unit} ${ingredient}**.`);
@@ -117,17 +119,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const protein = n('Protein');
 
         const embed = new EmbedBuilder()
-          .setTitle(`Nutrition — ${qty} ${unit} ${ingredient}`)
-          .setThumbnail(item.image || null)
-          .addFields(
-            { name: 'Calories', value: fmtNutrient(calories), inline: true },
-            { name: 'Carbs', value: fmtNutrient(carbs), inline: true },
-            { name: 'Fat', value: fmtNutrient(fat), inline: true },
-            { name: 'Protein', value: fmtNutrient(protein), inline: true },
-          )
-          .setFooter({ text: `Original text: "${item.original}"` });
+          .setTitle(`Nutrition — ${qty} ${unit} ${ingredient}`);
+
+        const thumb = spoonCdn(item.image, 'ingredients_100x100');
+        if (thumb) embed.setThumbnail(thumb);
+
+        embed.addFields(
+          { name: 'Calories', value: fmtNutrient(calories), inline: true },
+          { name: 'Carbs', value: fmtNutrient(carbs), inline: true },
+          { name: 'Fat', value: fmtNutrient(fat), inline: true },
+          { name: 'Protein', value: fmtNutrient(protein), inline: true },
+        ).setFooter({ text: `Original text: "${item.original}"` });
 
         await interaction.editReply({ embeds: [embed] });
+
         break;
       }
 
@@ -246,4 +251,14 @@ function fmtNutrient(n) {
 }
 function round1(x) {
   return Math.round(x * 10) / 10;
+}
+function isAbsoluteUrl(u) {
+  try { new URL(u); return true; } catch { return false; }
+}
+
+function spoonCdn(urlOrFile, folder = 'ingredients_100x100') {
+  if (!urlOrFile) return null;
+  if (isAbsoluteUrl(urlOrFile)) return urlOrFile;
+  // parseIngredients gives e.g. "olive-oil.jpg"
+  return `https://spoonacular.com/cdn/${folder}/${urlOrFile}`;
 }
